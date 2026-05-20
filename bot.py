@@ -114,6 +114,7 @@ async def reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 if __name__ == '__main__':
+    from telegram.ext import ApplicationBuilder
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', start))
@@ -123,4 +124,4 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('month', month))
     app.add_handler(CommandHandler('reviews', reviews))
     print('Bot started!')
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
