@@ -2,41 +2,43 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 TOKEN = os.environ.get('BOT_TOKEN', '8872327007:AAHaH8gonK4Kw12r7Ju1qVn6wVruQR1MSdw')
-DATA_FILE = 'feedback_data.json'
+DATA_FILE = '/tmp/feedback_data.json'
 
 def load_data():
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-    except:
-        pass
+    except Exception as e:
+        logging.error(f'load error: {e}')
     return []
 
-def get_stats_text(records, label='все время'):
+def get_stats_text(records, label='всё время'):
     total = len(records)
     if not total:
         return f'📭 За {label} отзывов нет.'
-    avg = sum(r['score'] for r in records) / total
-    pos = len([r for r in records if r['score'] >= 4])
+    avg = sum(r.get('score', 0) for r in records) / total
+    pos = len([r for r in records if r.get('score', 0) >= 4])
     pos_pct = round(pos / total * 100)
     counts = {1:0, 2:0, 3:0, 4:0, 5:0}
     for r in records:
-        counts[r['score']] = counts.get(r['score'], 0) + 1
+        s = r.get('score', 3)
+        counts[s] = counts.get(s, 0) + 1
     def bar(n):
         return '▓' * min(n, 10) if n > 0 else '░'
     tag_count = {}
     for r in records:
         if r.get('tags'):
             for t in r['tags'].split(', '):
-                if t:
-                    tag_count[t] = tag_count.get(t, 0) + 1
+                if t.strip():
+                    tag_count[t.strip()] = tag_count.get(t.strip(), 0) + 1
     top_tags = sorted(tag_count.items(), key=lambda x: -x[1])[:3]
     tags_text = '\n'.join(f'  • {k} ({v})' for k, v in top_tags)
     text = (
@@ -55,6 +57,9 @@ def get_stats_text(records, label='все время'):
     if tags_text:
         text += f'\n\n🏷 Топ причины:\n{tags_text}'
     return text
+
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -79,7 +84,8 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filtered = []
     for r in load_data():
         try:
-            if datetime.fromisoformat(r['dateISO'].replace('Z','+00:00')).replace(tzinfo=None) >= week_ago:
+            iso = r.get('dateISO', '').replace('Z', '')
+            if datetime.fromisoformat(iso) >= week_ago:
                 filtered.append(r)
         except:
             pass
@@ -90,7 +96,8 @@ async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filtered = []
     for r in load_data():
         try:
-            if datetime.fromisoformat(r['dateISO'].replace('Z','+00:00')).replace(tzinfo=None) >= month_ago:
+            iso = r.get('dateISO', '').replace('Z', '')
+            if datetime.fromisoformat(iso) >= month_ago:
                 filtered.append(r)
         except:
             pass
@@ -104,17 +111,17 @@ async def reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last10 = data[-10:][::-1]
     text = '💬 Последние отзывы:\n━━━━━━━━━━━━━━━\n'
     for i, r in enumerate(last10, 1):
-        stars = '⭐' * r['score']
-        text += f"\n{i}. {r.get('emoji','')} {stars}\n"
+        stars = '⭐' * r.get('score', 0)
+        text += f"\n{i}. {r.get('emoji', '')} {stars}\n"
         if r.get('tags'):
             text += f"🏷 {r['tags']}\n"
         if r.get('comment'):
             text += f"💬 {r['comment']}\n"
-        text += f"🕐 {r.get('date','')}\n"
+        text += f"🕐 {r.get('date', '')}\n"
     await update.message.reply_text(text)
 
-if __name__ == '__main__':
-    from telegram.ext import ApplicationBuilder
+def main():
+    logging.info('Starting bot...')
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', start))
@@ -123,5 +130,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('week', week))
     app.add_handler(CommandHandler('month', month))
     app.add_handler(CommandHandler('reviews', reviews))
-    print('Bot started!')
+    logging.info('Bot is running!')
     app.run_polling(drop_pending_updates=True)
+
+if __name__ == '__main__':
+    main()
