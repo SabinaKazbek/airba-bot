@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import datetime, timedelta, time
 import pytz
+from aiohttp import web
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -11,17 +12,17 @@ logging.basicConfig(
 
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ChatMemberHandler, ContextTypes
+    Application, ApplicationBuilder, CommandHandler, ChatMemberHandler, ContextTypes
 )
 
 TOKEN = os.environ.get('BOT_TOKEN')
 DATA_FILE = os.environ.get('DATA_FILE', '/tmp/feedback_data.json')
 CHATS_FILE = os.environ.get('CHATS_FILE', '/tmp/chats.json')
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', '')
 
 ALMATY_TZ = pytz.timezone('Asia/Almaty')
 DAILY_REPORT_HOUR = int(os.environ.get('REPORT_HOUR', '20'))
 DAILY_REPORT_MINUTE = int(os.environ.get('REPORT_MINUTE', '0'))
-NEW_REVIEW_CHECK_INTERVAL = int(os.environ.get('CHECK_INTERVAL', '60'))
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -52,6 +53,14 @@ def save_chats(chats):
             json.dump(chats, f)
     except Exception as e:
         logging.error(f'save_chats error: {e}')
+
+
+def save_data(data):
+    try:
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f'save_data error: {e}')
 
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
@@ -326,27 +335,51 @@ async def send_daily_report(context):
             logging.error(f'Daily report failed for {chat_id}: {e}')
 
 
-async def check_new_reviews(context):
+# ── Webhook HTTP server (receives reviews from the website) ───────────────────
+
+async def handle_review_webhook(request: web.Request) -> web.Response:
+    if WEBHOOK_SECRET:
+        if request.headers.get('X-Webhook-Secret', '') != WEBHOOK_SECRET:
+            return web.Response(status=403, text='forbidden')
+
+    try:
+        review = await request.json()
+    except Exception:
+        return web.Response(status=400, text='invalid json')
+
+    # Save to data file (deduplicate by dateISO)
     data = load_data()
-    current_count = len(data)
-    last_count = context.bot_data.get('last_review_count')
+    known = {r.get('dateISO') for r in data}
+    if review.get('dateISO') not in known:
+        data.append(review)
+        save_data(data)
 
-    if last_count is None:
-        context.bot_data['last_review_count'] = current_count
-        return
+        tg_app: Application = request.app['tg_app']
+        text = format_new_review(review)
+        for chat_id in load_chats():
+            try:
+                await tg_app.bot.send_message(chat_id=chat_id, text=text)
+            except Exception as e:
+                logging.error(f'Forward failed for {chat_id}: {e}')
 
-    if current_count > last_count:
-        new_reviews = data[last_count:]
-        chats = load_chats()
-        for review in new_reviews:
-            text = format_new_review(review)
-            for chat_id in chats:
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=text)
-                except Exception as e:
-                    logging.error(f'New review notify failed for {chat_id}: {e}')
+    return web.Response(text='ok')
 
-    context.bot_data['last_review_count'] = current_count
+
+async def start_web_server(tg_app: Application) -> None:
+    http_app = web.Application()
+    http_app['tg_app'] = tg_app
+    http_app.router.add_post('/webhook/review', handle_review_webhook)
+    http_app.router.add_get('/health', lambda _: web.Response(text='ok'))
+
+    runner = web.AppRunner(http_app)
+    await runner.setup()
+    port = int(os.environ.get('PORT', 8080))
+    await web.TCPSite(runner, '0.0.0.0', port).start()
+    logging.info(f'Webhook server listening on port {port}')
+
+
+async def on_startup(tg_app: Application) -> None:
+    await start_web_server(tg_app)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -355,7 +388,7 @@ def main():
     if not TOKEN:
         raise RuntimeError('BOT_TOKEN env var is not set')
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(on_startup).build()
 
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', start))
@@ -370,16 +403,12 @@ def main():
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
     jq = app.job_queue
-    jq.run_repeating(check_new_reviews, interval=NEW_REVIEW_CHECK_INTERVAL, first=15)
     jq.run_daily(
         send_daily_report,
         time=time(hour=DAILY_REPORT_HOUR, minute=DAILY_REPORT_MINUTE, tzinfo=ALMATY_TZ),
     )
 
-    logging.info(
-        f'Bot started. Daily report at {DAILY_REPORT_HOUR:02d}:{DAILY_REPORT_MINUTE:02d} Almaty. '
-        f'New review check every {NEW_REVIEW_CHECK_INTERVAL}s.'
-    )
+    logging.info(f'Bot started. Daily report at {DAILY_REPORT_HOUR:02d}:{DAILY_REPORT_MINUTE:02d} Almaty.')
     app.run_polling(drop_pending_updates=True)
 
 
